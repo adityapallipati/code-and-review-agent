@@ -139,7 +139,7 @@ class TaskManager:
                     next_step = "error"
 
             logger.info(f"Moving from {current_step} to {next_step}")
-            return {"next": next_step}
+            return {"next_step": next_step}
 
         # Add nodes
         nodes = {
