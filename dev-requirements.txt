@@ -1,0 +1,5 @@
+-r requirements.txt  # Includes all production dependencies
+pytest               # For running tests
+pylint               # For code linting
+black                # For code formatting (optional)
+mypy                 # For type checking (optional)

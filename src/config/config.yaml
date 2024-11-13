@@ -1,0 +1,16 @@
+code_generator:
+  max_attempts: 3
+  model_name: "gpt-3.5-turbo"
+  temperature: 0.7
+
+code_reviewer:
+  model_name: "gpt-4-turbo-preview"
+  temperature: 0.1
+  enable_security_checks: true
+  enable_performance_checks: true
+  enable_quality_checks: true
+
+task_manager:
+  workflow_name: "Code Generation and Review Workflow"
+  retry_attempts: 3
+  timeout_seconds: 300

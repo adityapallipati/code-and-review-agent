@@ -1,0 +1,4 @@
+langgraph
+openai
+pydantic
+rich
