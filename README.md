@@ -17,9 +17,13 @@ This project provides an AI-driven code generation and review system that levera
 
 ## Example
 
-![Code and Review Agent: Execute](assets/example_01.png)
+### Prompt Code Generation
+![Code and Review Agent: Execute](assets/example_02.png)
 
-![Code and Review Agent: Result](assets/example_02.png)
+### Review Code, Execute Code
+![Code and Review Agent: Result](assets/example_01.png)
+
+
 
 
 
