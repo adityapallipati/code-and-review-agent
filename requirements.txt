@@ -2,3 +2,7 @@ langgraph
 openai
 pydantic
 rich
+langchain
+langchain-openai
+langchain-core
+langsmith
