@@ -3,9 +3,9 @@ import datetime
 from typing import TypedDict, Sequence, Any, Literal
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langsmith import traceable
+from src.agents.llama_client import LlamaClient
 
 # Load environment variables
 load_dotenv()
@@ -41,16 +41,12 @@ class CodeGenerationResult(TypedDict):
 class CodeGenerator:
     """Agent responsible for generating code based on user prompts"""
     
-    def __init__(self, model_name: str = "gpt-3.5-turbo", max_attempts: int = 3):
+    def __init__(self, model_path: str = "src/models/codellama-7b-instruct.gguf", max_attempts: int = 3):
         """Initialize the code generator."""
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
-        
-        self.client = ChatOpenAI(
-            model=model_name,
+        self.client = LlamaClient(
+            model_path=model_path,
             temperature=0.7,
-            api_key=self.api_key
+            max_tokens=2000
         )
         self.max_attempts = max_attempts
 

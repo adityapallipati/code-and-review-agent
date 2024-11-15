@@ -339,12 +339,6 @@ def main():
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    # Check for OpenAI API key
-    if not os.getenv("OPENAI_API_KEY"):
-        console.print("[red]Error: OPENAI_API_KEY environment variable not set[/red]")
-        console.print("Please set your OpenAI API key in the .env file or environment variables")
-        return
-    
     # Create output directory if needed
     if args.save_history:
         os.makedirs(args.output, exist_ok=True)

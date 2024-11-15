@@ -1,10 +1,19 @@
-langgraph
-openai
-pydantic
-rich
+# Core dependencies
+numpy
 langchain
-langchain-openai
-langchain-core
-langsmith
-llama-cpp-python
 langchain-community
+langchain-core
+llama-cpp-python
+
+# Graph and workflow dependencies
+langgraph
+pydantic
+typing-extensions
+
+# CLI and interface dependencies
+rich
+prompt-toolkit
+
+# Utility dependencies
+python-dotenv
+pyyaml
