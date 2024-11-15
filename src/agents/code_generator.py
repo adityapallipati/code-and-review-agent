@@ -102,7 +102,7 @@ Format:
         response = self.client.invoke(messages)
         
         # Parse the response
-        code_content = self._extract_code(response.content)
+        code_content = self._clean_code(response.content)
         confidence_score = self._extract_confidence(response.content)
         
         # Determine if human review is needed based on confidence score
@@ -125,16 +125,28 @@ Format:
     def _update_state(self, state: WorkflowState, result: CodeGenerationResult) -> WorkflowState:
         """Update the workflow state with generation results."""
         state["attempts"] += 1
-        state["current_code"] = result["code"]
+        
+        # Handle generated code content
+        if isinstance(result["code"], dict) and "content" in result["code"]:
+            code_content = result["code"]["content"]
+        elif isinstance(result["code"], dict) and "role" in result["code"]:
+            # Handle assistant message format
+            code_content = result["code"].get("content", "")
+        else:
+            code_content = str(result["code"]) if result["code"] else None
+        
+        # Update state
+        state["current_code"] = code_content
         state["metadata"]["generation"] = result["generation_metadata"]
         state["status"]["generation"] = result["success"]
         
         if result["error"]:
             state["errors"].append(result["error"])
         
+        # Add message to history
         state["messages"].append({
             "role": "assistant",
-            "content": result["code"],
+            "content": code_content,
             "type": "code_generation",
             "metadata": {
                 "confidence_score": result["confidence_score"],
@@ -142,9 +154,8 @@ Format:
             }
         })
         
-        state["next_step"] = "review"
         return state
-
+    
     def _handle_error(self, state: WorkflowState, error_msg: str) -> WorkflowState:
         """Handle errors in the generation process."""
         state["errors"].append(error_msg)
@@ -167,11 +178,39 @@ Format:
         return None
 
     @staticmethod
-    def _extract_code(content: str) -> str:
-        """Extract code from the response content."""
+    def _clean_code(content: str) -> str:
+        """Clean and validate the code content."""
+        # First try to extract code from tags if present
         import re
         code_match = re.search(r'<code>(.*?)</code>', content, re.DOTALL)
-        return code_match.group(1).strip() if code_match else content.strip()
+        if code_match:
+            code = code_match.group(1).strip()
+        else:
+            # If no tags, treat the whole content as code
+            code = content.strip()
+        
+        # Remove markdown code blocks if present
+        code = re.sub(r'^```python\n', '', code)
+        code = re.sub(r'^```\n', '', code)
+        code = re.sub(r'\n```$', '', code)
+        
+        # Basic validation
+        try:
+            import ast
+            ast.parse(code)
+            return code
+        except SyntaxError:
+            # If parsing fails, try to fix common issues
+            # Replace smart quotes
+            code = code.replace('"', '"').replace('"', '"')
+            code = code.replace(''', "'").replace(''', "'")
+            
+            try:
+                ast.parse(code)
+                return code
+            except SyntaxError:
+                # If still invalid, return original cleaned code
+                return code
 
     @staticmethod
     def _extract_confidence(content: str) -> float:

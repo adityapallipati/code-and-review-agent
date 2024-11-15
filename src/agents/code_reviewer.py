@@ -1,3 +1,4 @@
+import logging
 import os
 import ast
 import datetime
@@ -7,6 +8,13 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langsmith import traceable
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -71,23 +79,60 @@ class CodeReviewer:
             api_key=self.api_key
         )
 
-    @traceable
     def review(self, state: WorkflowState) -> WorkflowState:
         """Review the generated code and provide comprehensive feedback."""
         try:
-            if not state["current_code"]:
-                return self._handle_error(state, "No code to review")
+            if not state.get("current_code"):
+                logger.error("No code available for review")
+                return self._handle_error(state, "No code available for review")
 
+            logger.info(f"Reviewing code:\n{state['current_code']}")
+            
             # Perform static analysis
             static_analysis = self._perform_static_analysis(state["current_code"])
             
-            # Get LLM-based review
-            review_result = self._perform_llm_review(state["current_code"], static_analysis)
-            
-            # Update state with review results
-            return self._update_state(state, review_result)
-
+            try:
+                # Get LLM-based review
+                review_result = self._perform_llm_review(state["current_code"], static_analysis)
+                
+                # Update state with review results
+                updated_state = {
+                    **state,
+                    "review_feedback": {
+                        "approved": review_result["approved"],
+                        "security": review_result["security"],
+                        "performance": review_result["performance"],
+                        "quality": review_result["quality"],
+                        "requires_human_review": review_result["requires_human_review"],
+                        "confidence_score": review_result["confidence_score"],
+                        "metadata": review_result["review_metadata"]
+                    },
+                    "status": {**state.get("status", {}), "review": True},
+                    "messages": state.get("messages", []) + [{
+                        "role": "assistant",
+                        "content": "Code Review Complete",
+                        "type": "review",
+                        "review_data": review_result
+                    }]
+                }
+                
+                # Set next step based on review results
+                if review_result["requires_human_review"]:
+                    updated_state["next_step"] = "await_human_input"
+                elif review_result["approved"]:
+                    updated_state["next_step"] = "prepare_execution"
+                else:
+                    updated_state["next_step"] = "generate"
+                    
+                logger.info(f"Review complete. Next step: {updated_state['next_step']}")
+                return updated_state
+                
+            except Exception as e:
+                logger.error(f"Error in review process: {e}")
+                return self._handle_error(state, f"Review error: {str(e)}")
+                
         except Exception as e:
+            logger.error(f"Unexpected error in review: {e}")
             return self._handle_error(state, f"Review error: {str(e)}")
 
     def _perform_static_analysis(self, code: str) -> dict:
@@ -165,71 +210,74 @@ class CodeReviewer:
     def _perform_llm_review(self, code: str, static_analysis: dict) -> CodeReviewResult:
         """Get LLM-based code review."""
         messages = [
-            SystemMessage(content="""You are an expert code reviewer. Analyze the provided Python code and provide a detailed review focusing on:
-1. Security vulnerabilities
-2. Performance optimization opportunities
-3. Code quality and best practices
-4. Potential bugs and edge cases
-5. Input validation and error handling
+            SystemMessage(content="""You are an expert code reviewer. Review the provided Python code and return a JSON object with the following structure:
+    {
+        "security": {
+            "has_issues": boolean,
+            "issues": [],
+            "risk_level": "low",
+            "recommendations": []
+        },
+        "performance": {
+            "has_issues": boolean,
+            "issues": [],
+            "recommendations": [],
+            "complexity_analysis": {
+                "time_complexity": "O(1)",
+                "space_complexity": "O(1)"
+            }
+        },
+        "quality": {
+            "has_issues": boolean,
+            "issues": [],
+            "recommendations": [],
+            "metrics": {
+                "maintainability": 10,
+                "readability": 10,
+                "testability": 10
+            }
+        },
+        "approved": boolean,
+        "requires_human_review": boolean,
+        "confidence_score": number
+    }
 
-Format your response as a JSON object with the following structure:
-{
-    "security": {
-        "has_issues": boolean,
-        "issues": [string],
-        "risk_level": "low"|"medium"|"high",
-        "recommendations": [string]
-    },
-    "performance": {
-        "has_issues": boolean,
-        "issues": [string],
-        "recommendations": [string],
-        "complexity_analysis": {
-            "time_complexity": string,
-            "space_complexity": string
-        }
-    },
-    "quality": {
-        "has_issues": boolean,
-        "issues": [string],
-        "recommendations": [string],
-        "metrics": {
-            "maintainability": number,
-            "readability": number,
-            "testability": number
-        }
-    },
-    "approved": boolean,
-    "confidence_score": number,
-    "requires_human_review": boolean
-}"""),
+    Return ONLY the JSON object, no other text."""),
             HumanMessage(content=f"""Review this Python code:
 
-{code}
+    {code}
 
-Static analysis results:
-{static_analysis}""")
+    Static analysis results:
+    {static_analysis}""")
         ]
 
-        response = self.client.invoke(messages)
-        
-        # Parse the JSON response
-        import json
-        review_data = json.loads(response.content)
-        
-        return CodeReviewResult(
-            success=True,
-            approved=review_data["approved"],
-            security=review_data["security"],
-            performance=review_data["performance"],
-            quality=review_data["quality"],
-            requires_human_review=review_data["requires_human_review"],
-            confidence_score=review_data["confidence_score"],
-            review_metadata={
-                "static_analysis": static_analysis,
-                "timestamp": str(datetime.datetime.now())
-            }
-        )
+        try:
+            response = self.client.invoke(messages)
+            
+            # Parse the JSON response
+            import json
+            review_data = json.loads(response.content)
+            
+            return CodeReviewResult(
+                success=True,
+                approved=review_data["approved"],
+                security=review_data["security"],
+                performance=review_data["performance"],
+                quality=review_data["quality"],
+                requires_human_review=review_data["requires_human_review"],
+                confidence_score=review_data["confidence_score"],
+                review_metadata={
+                    "static_analysis": static_analysis,
+                    "timestamp": str(datetime.datetime.now())
+                }
+            )
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM response: {e}")
+            logger.error(f"Response content: {response.content}")
+            raise ValueError(f"Failed to parse review response: {e}")
+        except Exception as e:
+            logger.error(f"Error during LLM review: {e}")
+            raise
 
     def _update_state(self, state: WorkflowState, result: CodeReviewResult) -> WorkflowState:
         """Update workflow state with review results."""
@@ -263,10 +311,13 @@ Static analysis results:
 
     def _handle_error(self, state: WorkflowState, error_msg: str) -> WorkflowState:
         """Handle errors in the review process."""
-        state["errors"].append(error_msg)
-        state["status"]["review"] = False
-        state["next_step"] = "error"
-        return state
+        logger.error(f"Handling review error: {error_msg}")
+        return {
+            **state,
+            "errors": state.get("errors", []) + [error_msg],
+            "status": {**state.get("status", {}), "review": False},
+            "next_step": "error"
+        }
 
 # Conditional routing functions
 def should_fix_code(state: WorkflowState) -> bool:

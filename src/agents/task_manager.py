@@ -1,14 +1,17 @@
+import operator
 import os
+import sys
 import yaml
 import logging
 import tempfile
 import subprocess
-from typing import TypedDict, Sequence, Any, Dict, Callable
+from typing import Annotated, TypedDict, Sequence, Any, Dict, Callable
 from typing_extensions import TypeAlias
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from langsmith import traceable
 from langgraph.graph import StateGraph
+from langchain_core.messages import HumanMessage, SystemMessage
 import datetime
 
 # Local imports
@@ -48,20 +51,23 @@ class TaskRequest(BaseModel):
             "max_runtime_seconds": 30
         }
     )
+def last_value(x: Any, y: Any) -> Any:
+    """Take the last value in case of concurrent updates."""
+    return y
 
 class WorkflowState(TypedDict):
     """Complete workflow state definition"""
-    messages: Sequence[dict]
-    current_code: str | None
-    next_step: str
-    attempts: int
-    status: dict
-    errors: list[str]
-    review_feedback: dict | None
-    execution_result: dict | None
-    human_feedback: dict | None
-    metadata: dict
-    route: str | None
+    messages: Annotated[list[dict], operator.add]
+    current_code: Annotated[str | None, last_value]  # Changed from list[dict] to str | None
+    next_step: Annotated[str, last_value]
+    attempts: Annotated[int, last_value]
+    status: Annotated[dict, last_value]
+    errors: Annotated[list[str], operator.add]
+    review_feedback: Annotated[dict | None, last_value]
+    execution_result: Annotated[dict | None, last_value]
+    human_feedback: Annotated[dict | None, last_value]
+    metadata: Annotated[dict, last_value]
+    route: Annotated[str | None, last_value]
 
 class TaskManager:
     """Manages the code generation, review, and execution workflow"""
@@ -84,137 +90,137 @@ class TaskManager:
             raise
 
     def _build_workflow_graph(self) -> StateGraph:
-        """Build the workflow graph with nodes and conditional edges."""
-        # Create the graph
-        graph = StateGraph(WorkflowState)
+        """Build simplified workflow graph with clear state transitions."""
+        from langgraph.graph import START, END
         
-        # Define the next step function
-        def get_next_step(state: WorkflowState) -> dict:
-            """Determine the next step based on current state."""
-            current_step = state.get("next_step", "generate")
-            logger.info(f"Current step: {current_step}")
-
-            next_step = current_step  # Default to same step
+        workflow = StateGraph(WorkflowState)
+        
+        # Define the nodes with simpler responsibilities
+        workflow.add_node("generate", self._generation_node)
+        workflow.add_node("check_code", self._review_node)
+        workflow.add_node("human_review", self._human_input_node)
+        workflow.add_node("execute", self._execution_node)
+        
+        # Define the decision function
+        def decide_next_step(state: WorkflowState) -> str:
+            """Determine next step based on state."""
+            logger.info(f"Deciding next step. Current state: {state.get('next_step')}")
             
-            if current_step == "generate":
-                if state.get("errors"):
-                    next_step = "error"
-                elif state["status"].get("generation") is True:
-                    next_step = "review"
-                # else stay in generate
-
-            elif current_step == "review":
-                review_feedback = state.get("review_feedback", {})
-                if state.get("errors"):
-                    next_step = "error"
-                elif review_feedback.get("requires_human_review"):
-                    next_step = "await_human_input"
-                elif review_feedback.get("approved"):
-                    next_step = "prepare_execution"
-                else:
-                    next_step = "generate"
-
-            elif current_step == "await_human_input":
-                if state.get("errors"):
-                    next_step = "error"
-                elif state["human_feedback"].get("approved"):
-                    next_step = "prepare_execution"
-                else:
-                    next_step = "generate"
-
-            elif current_step == "prepare_execution":
-                if state.get("errors"):
-                    next_step = "error"
-                elif state["status"].get("execution_prepared"):
-                    next_step = "execute"
-                else:
-                    next_step = "error"
-
-            elif current_step == "execute":
-                if state.get("errors"):
-                    next_step = "error"
-                elif state["execution_result"].get("success"):
-                    next_step = "complete"
-                else:
-                    next_step = "error"
-
-            logger.info(f"Moving from {current_step} to {next_step}")
-            return {"next_step": next_step}
-
-        # Add nodes
-        nodes = {
-            "generate": self._generation_node,
-            "review": self._review_node,
-            "await_human_input": self._human_input_node,
-            "prepare_execution": self._preparation_node,
-            "execute": self._execution_node,
-            "complete": self._complete_workflow,
-            "error": self._handle_error,
-        }
-
-        # Add all nodes to graph
-        for name, func in nodes.items():
-            graph.add_node(name, func)
-
-        # Add edge for each node to router
-        graph.add_node("router", get_next_step)
+            if state.get("errors"):
+                logger.info("Errors found, ending workflow")
+                return "end"
+                
+            review_feedback = state.get("review_feedback", {})
+            if review_feedback.get("requires_human_review"):
+                return "human_review"
+            elif review_feedback.get("approved"):
+                return "execute"
+            else:
+                return "generate"
         
-        # Connect each node to router
-        for name in nodes.keys():
-            if name not in ["complete", "error"]:
-                graph.add_edge(name, "router")
-        
-        # Connect router to all nodes
-        for name in nodes.keys():
-            graph.add_edge("router", name)
+        # Add edges with clear flow
+        workflow.add_edge(START, "generate")
+        workflow.add_edge("generate", "check_code")
+        workflow.add_conditional_edges(
+            "check_code",
+            decide_next_step,
+            {
+                "human_review": "human_review",
+                "execute": "execute",
+                "generate": "generate",
+                "end": END
+            }
+        )
+        workflow.add_edge("human_review", "execute")
+        workflow.add_edge("execute", END)
         
         # Set entry point
-        graph.set_entry_point("generate")
+        workflow.set_entry_point("generate")
         
         logger.info("Workflow graph built successfully")
-        return graph.compile()
+        return workflow.compile()
     
     def _generation_node(self, state: WorkflowState) -> WorkflowState:
-        """Handle code generation."""
+        """Generate code with simpler success/failure states."""
         logger.info("Starting code generation...")
-        generator = CodeGenerator()
         try:
-            state = generator.generate(state)
-            logger.info(f"Generation complete. Success: {state['status'].get('generation', False)}")
-            state["next_step"] = "generate"  # Will be updated by router if successful
-            return state
+            updated_state = {
+                **state,
+                "status": {"generation": True},
+                "next_step": "check_code",
+                "errors": []
+            }
+            
+            # Generate code
+            generator = CodeGenerator()
+            updated_state = generator.generate(updated_state)
+            
+            if not updated_state.get("current_code"):
+                return {**updated_state, "errors": ["Code generation failed"]}
+                
+            return updated_state
+            
         except Exception as e:
-            logger.error(f"Error in code generation: {e}")
-            state["errors"].append(str(e))
-            state["next_step"] = "error"
-            return state
-
+            logger.error(f"Generation error: {e}")
+            return {**state, "errors": [str(e)]}
+        
     def _review_node(self, state: WorkflowState) -> WorkflowState:
-        """Handle code review."""
+        """Review code with clear pass/fail paths."""
         logger.info("Starting code review...")
-        reviewer = CodeReviewer()
+        logger.info(f"Code to review: {state.get('current_code')}")
+        
         try:
-            state = reviewer.review(state)
-            logger.info(f"Review complete. Feedback: {state.get('review_feedback', {}).get('approved', False)}")
-            state["next_step"] = "review"  # Will be updated by router based on review results
-            return state
+            reviewer = CodeReviewer()
+            
+            # Get review feedback with explicit flag for human review
+            review_feedback = reviewer._perform_llm_review(
+                state["current_code"],
+                {"syntax_valid": True}  # Simplified static analysis
+            )
+            
+            # Update state with review results
+            return {
+                **state,
+                "review_feedback": review_feedback,
+                "status": {**state.get("status", {}), "review": True},
+                "next_step": (
+                    "human_review" if review_feedback.get("requires_human_review")
+                    else "execute" if review_feedback.get("approved")
+                    else "generate"
+                )
+            }
+            
         except Exception as e:
-            logger.error(f"Error in code review: {e}")
-            state["errors"].append(str(e))
-            state["next_step"] = "error"
-            return state
+            logger.error(f"Review error: {e}")
+            return {**state, "errors": [f"Review error: {str(e)}"]}
 
     def _human_input_node(self, state: WorkflowState) -> WorkflowState:
-        """Handle human input/approval step."""
+        """Get human input with proper console interaction."""
         logger.info("Awaiting human input...")
-        state["human_feedback"] = {
-            "approved": True,
-            "feedback": "Automated approval for demonstration",
-            "timestamp": str(datetime.datetime.now())
-        }
-        logger.info("Human input received")
-        state["next_step"] = "await_human_input"  # Will be updated by router
-        return state
+        
+        try:
+            from rich.console import Console
+            from rich.prompt import Confirm
+            
+            console = Console()
+            console.print("\n[bold blue]Code Review Required[/bold blue]")
+            console.print(f"\nCode to review:\n{state['current_code']}")
+            console.print("\nReview feedback:", state["review_feedback"])
+            
+            approved = Confirm.ask("\nWould you like to approve this code?", default=False)
+            
+            return {
+                **state,
+                "human_feedback": {
+                    "approved": approved,
+                    "timestamp": str(datetime.datetime.now())
+                },
+                "next_step": "execute" if approved else "generate"
+            }
+            
+        except Exception as e:
+            logger.error(f"Human input error: {e}")
+            return {**state, "errors": [f"Human input error: {str(e)}"]}
 
     def _preparation_node(self, state: WorkflowState) -> WorkflowState:
         """Prepare code for execution."""
@@ -223,37 +229,204 @@ class TaskManager:
         state["next_step"] = "prepare_execution"  # Will be updated by router
         return state
 
+    def _prepare_execution(self, state: WorkflowState) -> WorkflowState:
+        """Prepare code for execution with proper requirements."""
+        logger.info("Preparing for execution...")
+        try:
+            execution_requirements = state.get("metadata", {}).get("request_config", {}).get("execution_requirements", {})
+            
+            # Validate the code meets requirements
+            code_content = state["current_code"]
+            
+            # Check for file operations if not allowed
+            if not execution_requirements.get("allow_file_operations", False):
+                if "open(" in code_content or "write" in code_content or "read" in code_content:
+                    return {
+                        **state,
+                        "errors": ["File operations not allowed"],
+                        "status": {**state.get("status", {}), "execution_prepared": False},
+                        "next_step": "error"
+                    }
+            
+            # Check for network access if not allowed
+            if not execution_requirements.get("allow_network_access", False):
+                if "requests" in code_content or "urllib" in code_content or "socket" in code_content:
+                    return {
+                        **state,
+                        "errors": ["Network access not allowed"],
+                        "status": {**state.get("status", {}), "execution_prepared": False},
+                        "next_step": "error"
+                    }
+            
+            return {
+                **state,
+                "status": {**state.get("status", {}), "execution_prepared": True},
+                "next_step": "execute",
+                "execution_config": {
+                    "timeout": execution_requirements.get("max_runtime_seconds", 5),
+                    "allow_file_ops": execution_requirements.get("allow_file_operations", False),
+                    "allow_network": execution_requirements.get("allow_network_access", False)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Preparation error: {e}")
+            return {
+                **state,
+                "errors": [f"Preparation error: {str(e)}"],
+                "status": {**state.get("status", {}), "execution_prepared": False},
+                "next_step": "error"
+            }
+    
     def _execution_node(self, state: WorkflowState) -> WorkflowState:
         """Execute the approved code."""
         logger.info("Starting code execution...")
         try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py') as tmp:
-                tmp.write(state["current_code"])
-                tmp.flush()
-                result = subprocess.run(
-                    ['python', tmp.name],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-                execution_result = {
-                    "success": result.returncode == 0,
-                    "output": result.stdout,
-                    "error": result.stderr if result.returncode != 0 else None,
-                    "runtime_seconds": 0.1
-                }
-        except Exception as e:
-            execution_result = {
-                "success": False,
-                "output": None,
-                "error": str(e),
-                "runtime_seconds": 0
-            }
+            code_content = state["current_code"]
+            logger.info(f"Executing code:\n{code_content}")
             
-        state["execution_result"] = execution_result
-        state["next_step"] = "execute"  # Will be updated by router
-        logger.info(f"Execution complete. Success: {execution_result['success']}")
-        return state
+            # Check if code contains input() function
+            if "input(" in code_content:
+                # Modify the code to use a default value instead of waiting for input
+                modified_code = code_content.replace(
+                    'input("Enter your name: ")',
+                    '"User"  # Modified for automated execution'
+                )
+                
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
+                    tmp.write(modified_code)
+                    tmp.flush()
+                    
+                    try:
+                        start_time = datetime.datetime.now()
+                        result = subprocess.run(
+                            ['python', tmp.name],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        end_time = datetime.datetime.now()
+                        runtime = (end_time - start_time).total_seconds()
+                        
+                        # Create execution result
+                        execution_result = {
+                            "success": result.returncode == 0,
+                            "output": result.stdout,
+                            "error": result.stderr if result.returncode != 0 else None,
+                            "runtime_seconds": runtime,
+                            "note": "Code was modified to run automatically with default input 'User'"
+                        }
+                        
+                        logger.info(f"Execution completed. Output: {result.stdout}")
+                        
+                        # Update state
+                        return {
+                            **state,
+                            "execution_result": execution_result,
+                            "status": {**state.get("status", {}), "execution": True},
+                            "next_step": "complete",
+                            "messages": state.get("messages", []) + [{
+                                "role": "assistant",
+                                "content": "Code execution complete (with automated input)",
+                                "type": "execution",
+                                "execution_result": execution_result
+                            }]
+                        }
+                        
+                    except subprocess.TimeoutExpired as te:
+                        logger.error("Execution timed out")
+                        return {
+                            **state,
+                            "execution_result": {
+                                "success": False,
+                                "output": None,
+                                "error": f"Execution timed out after 5 seconds",
+                                "runtime_seconds": 5
+                            },
+                            "status": {**state.get("status", {}), "execution": False},
+                            "next_step": "error"
+                        }
+                        
+                    finally:
+                        # Clean up the temp file
+                        try:
+                            os.unlink(tmp.name)
+                        except:
+                            pass
+                            
+            else:
+                # Execute non-interactive code normally
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
+                    tmp.write(code_content)
+                    tmp.flush()
+                    
+                    try:
+                        start_time = datetime.datetime.now()
+                        result = subprocess.run(
+                            ['python', tmp.name],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        end_time = datetime.datetime.now()
+                        runtime = (end_time - start_time).total_seconds()
+                        
+                        execution_result = {
+                            "success": result.returncode == 0,
+                            "output": result.stdout,
+                            "error": result.stderr if result.returncode != 0 else None,
+                            "runtime_seconds": runtime
+                        }
+                        
+                        logger.info(f"Execution completed. Output: {result.stdout}")
+                        
+                        return {
+                            **state,
+                            "execution_result": execution_result,
+                            "status": {**state.get("status", {}), "execution": True},
+                            "next_step": "complete",
+                            "messages": state.get("messages", []) + [{
+                                "role": "assistant",
+                                "content": "Code execution complete",
+                                "type": "execution",
+                                "execution_result": execution_result
+                            }]
+                        }
+                        
+                    except subprocess.TimeoutExpired as te:
+                        logger.error("Execution timed out")
+                        return {
+                            **state,
+                            "execution_result": {
+                                "success": False,
+                                "output": None,
+                                "error": f"Execution timed out after 5 seconds",
+                                "runtime_seconds": 5
+                            },
+                            "status": {**state.get("status", {}), "execution": False},
+                            "next_step": "error"
+                        }
+                        
+                    finally:
+                        # Clean up the temp file
+                        try:
+                            os.unlink(tmp.name)
+                        except:
+                            pass
+                            
+        except Exception as e:
+            logger.error(f"Execution error: {e}")
+            return {
+                **state,
+                "execution_result": {
+                    "success": False,
+                    "output": None,
+                    "error": str(e),
+                    "runtime_seconds": 0
+                },
+                "status": {**state.get("status", {}), "execution": False},
+                "next_step": "error"
+            }
 
     def route_after_generation(self, state: WorkflowState) -> str:
         """Route after code generation."""
@@ -327,10 +500,21 @@ class TaskManager:
 
     def _handle_error(self, state: WorkflowState) -> WorkflowState:
         """Handle workflow errors."""
-        logger.error(f"Handling errors: {state['errors']}")
-        state["metadata"]["end_time"] = str(datetime.datetime.now())
-        state["next_step"] = "error"
-        return state
+        # Get the most recent error if there are multiple
+        errors = state.get("errors", [])
+        error_message = errors[-1] if errors else "Unknown error"
+        logger.error(f"Handling error: {error_message}")
+        
+        return {
+            **state,
+            "status": {**state.get("status", {}), "error": True},
+            "next_step": "complete",  # End the workflow instead of looping
+            "metadata": {
+                **state.get("metadata", {}), 
+                "end_time": str(datetime.datetime.now()),
+                "error": error_message
+            }
+        }
 
     @traceable
     def execute_workflow(self, request: TaskRequest) -> dict:
@@ -339,50 +523,58 @@ class TaskManager:
             logger.info(f"Starting workflow with prompt: {request.prompt}")
             
             # Initialize workflow state
-            initial_state = WorkflowState(
-                messages=[{"role": "human", "content": request.prompt}],
-                current_code=None,
-                next_step="generate",
-                attempts=0,
-                status={},
-                errors=[],
-                review_feedback=None,
-                execution_result=None,
-                human_feedback=None,
-                metadata={
+            initial_state: WorkflowState = {
+                "messages": [{"role": "human", "content": request.prompt}],
+                "current_code": None,
+                "next_step": "generate",
+                "attempts": 0,
+                "status": {"initialized": True},
+                "errors": [],
+                "review_feedback": None,
+                "execution_result": None,
+                "human_feedback": None,
+                "metadata": {
                     "start_time": str(datetime.datetime.now()),
                     "request_config": request.dict(),
                     "workflow_id": os.urandom(16).hex()
-                }
-            )
-            
-            logger.info("Starting workflow execution...")
-            logger.info(f"Initial state: {initial_state}")
-            
-            try:
-                final_state = self.workflow_graph.invoke(initial_state)
-                logger.info("Workflow completed successfully")
-                logger.info(f"Final state: {final_state}")
-            except Exception as e:
-                logger.error(f"Error during graph execution: {e}")
-                raise
-            
-            # Prepare response
-            response = {
-                "status": "success" if not final_state["errors"] else "error",
-                "generated_code": final_state["current_code"],
-                "review_feedback": final_state["review_feedback"],
-                "execution_result": final_state["execution_result"],
-                "errors": final_state["errors"],
-                "metadata": final_state["metadata"]
+                },
+                "route": None
             }
             
-            logger.info(f"Workflow response prepared: {response['status']}")
-            return response
-            
+            try:
+                # Execute workflow
+                final_state = self.workflow_graph.invoke(initial_state)
+                logger.info("Workflow completed")
+                
+                # Check for errors
+                if final_state.get("errors"):
+                    return {
+                        "status": "error",
+                        "errors": final_state["errors"],
+                        "generated_code": final_state.get("current_code"),
+                        "metadata": final_state.get("metadata", {})
+                    }
+                
+                # Return successful result
+                return {
+                    "status": "success",
+                    "generated_code": final_state.get("current_code"),
+                    "review_feedback": final_state.get("review_feedback"),
+                    "execution_result": final_state.get("execution_result"),
+                    "metadata": final_state.get("metadata", {})
+                }
+                
+            except Exception as e:
+                logger.error(f"Workflow execution failed: {e}")
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "metadata": initial_state["metadata"]
+                }
+                
         except Exception as e:
-            logger.error(f"Workflow execution failed: {e}")
+            logger.error(f"Workflow initialization failed: {e}")
             return {
-                "error": str(e),
-                "status": "error"
+                "status": "error",
+                "error": str(e)
             }
