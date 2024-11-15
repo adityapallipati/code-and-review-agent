@@ -6,3 +6,5 @@ langchain
 langchain-openai
 langchain-core
 langsmith
+llama-cpp-python
+langchain-community
